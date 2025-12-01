@@ -56,8 +56,10 @@ impl TransactionProcessor {
         }
 
         // Deposits work if account is not locked
+        // Note: only deposits are stored since they're the only disputable transactions
         let account = self.get_or_create_account(record.client);
         if account.deposit(amount) {
+
             let transaction = Transaction::new(
                 record.tx,
                 record.client,
@@ -80,16 +82,9 @@ impl TransactionProcessor {
         }
 
         // Withdrawals work if funds are available and account is not locked
+        // Note: Withdrawals are not stored since they cannot be disputed
         let account = self.get_or_create_account(record.client);
-        if account.withdraw(amount) {
-            let transaction = Transaction::new(
-                record.tx,
-                record.client,
-                record.transaction_type,
-                amount,
-            );
-            self.transactions.insert(transaction.tx_id, transaction);
-        }
+        account.withdraw(amount);
     }
 
     fn handle_dispute(&mut self, record: TransactionInput) {
