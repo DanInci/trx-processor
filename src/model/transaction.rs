@@ -57,8 +57,8 @@ pub enum TransactionState {
 
 #[derive(Debug, Clone)]
 pub struct Transaction {
-    pub tx_id: u32,
     pub client_id: u16,
+    pub tx_id: u32,
     pub transaction_type: TransactionType,
     pub amount: Decimal,
     pub state: TransactionState,
@@ -72,8 +72,8 @@ impl Transaction {
         amount: Decimal,
     ) -> Self {
         Transaction {
-            tx_id,
             client_id,
+            tx_id,
             transaction_type,
             amount,
             state: TransactionState::Normal,

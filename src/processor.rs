@@ -3,7 +3,7 @@ use std::fs::File;
 
 use crate::model::account::Account;
 use crate::model::error::ProcessorError;
-use crate::model::transaction::{Transaction, TransactionInput, TransactionType};
+use crate::model::transaction::{Transaction, TransactionInput, TransactionState, TransactionType};
 
 
 pub struct TransactionProcessor {
@@ -64,7 +64,7 @@ impl TransactionProcessor {
                 record.transaction_type,
                 amount,
             );
-            self.transactions.insert(record.tx, transaction);
+            self.transactions.insert(transaction.tx_id, transaction);
         }
     }
 
@@ -88,20 +88,94 @@ impl TransactionProcessor {
                 record.transaction_type,
                 amount,
             );
-            self.transactions.insert(record.tx, transaction);
+            self.transactions.insert(transaction.tx_id, transaction);
         }
     }
 
     fn handle_dispute(&mut self, record: TransactionInput) {
-        // TODO: Implement dispute logic
+        // Referenced transaction must exist
+        let Some(transaction) = self.transactions.get_mut(&record.tx) else {
+            return;
+        };
+
+        // Verify the transaction belongs to the same client
+        if transaction.client_id != record.client {
+            return;
+        }
+
+        // Only deposits can be disputed
+        if transaction.transaction_type != TransactionType::Deposit {
+            return;
+        }
+
+        // Transaction must not already be disputed or charged back
+        if transaction.state != TransactionState::Normal {
+            return;
+        }
+
+        // Get the account and hold the funds
+        let Some(account) = self.accounts.get_mut(&record.client) else {
+            return;
+        };
+
+        // Mark transaction as under dispute
+        if account.hold_funds(transaction.amount) {
+            transaction.state = TransactionState::UnderDispute;
+        }
     }
 
     fn handle_resolve(&mut self, record: TransactionInput) {
-        // TODO: Implement resolve logic
+        // Referenced transaction must exist
+        let Some(transaction) = self.transactions.get_mut(&record.tx) else {
+            return;
+        };
+
+        // Verify the transaction belongs to the same client
+        if transaction.client_id != record.client {
+            return;
+        }
+
+        // Transaction must be under dispute
+        if transaction.state != TransactionState::UnderDispute {
+            return;
+        }
+
+        // Get the account and release the held funds
+        let Some(account) = self.accounts.get_mut(&record.client) else {
+            return;
+        };
+
+        // Mark transaction as resolved (back to normal)
+        if account.release_funds(transaction.amount) {
+            transaction.state = TransactionState::Normal;
+        }
     }
 
     fn handle_chargeback(&mut self, record: TransactionInput) {
-        // TODO: Implement chargeback logic
+        // Referenced transaction must exist
+        let Some(transaction) = self.transactions.get_mut(&record.tx) else {
+            return;
+        };
+
+        // Verify the transaction belongs to the same client
+        if transaction.client_id != record.client {
+            return;
+        }
+
+        // Transaction must be under dispute
+        if transaction.state != TransactionState::UnderDispute {
+            return;
+        }
+
+        // Get the account and perform chargeback
+        let Some(account) = self.accounts.get_mut(&record.client) else {
+            return;
+        };
+
+        // Mark transaction as charged back and lock account
+        if account.chargeback(transaction.amount) {
+            transaction.state = TransactionState::ChargedBack;
+        }
     }
 
     fn get_or_create_account(&mut self, client_id: u16) -> &mut Account {

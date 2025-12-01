@@ -5,7 +5,6 @@ pub enum ProcessorError {
     InvalidArguments(String),
     IoError(std::io::Error),
     CsvError(csv::Error),
-    TransactionError(String),
 }
 
 impl fmt::Display for ProcessorError {
@@ -14,7 +13,6 @@ impl fmt::Display for ProcessorError {
             ProcessorError::InvalidArguments(msg) => write!(f, "Invalid arguments: {}", msg),
             ProcessorError::IoError(err) => write!(f, "I/O error: {}", err),
             ProcessorError::CsvError(err) => write!(f, "CSV error: {}", err),
-            ProcessorError::TransactionError(msg) => write!(f, "Transaction error: {}", msg),
         }
     }
 }
