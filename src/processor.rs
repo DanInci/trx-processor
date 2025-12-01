@@ -3,11 +3,12 @@ use std::fs::File;
 
 use crate::model::account::Account;
 use crate::model::error::ProcessorError;
-use crate::model::transaction::{TransactionInput, TransactionType};
+use crate::model::transaction::{Transaction, TransactionInput, TransactionType};
 
 
 pub struct TransactionProcessor {
     accounts: HashMap<u16, Account>,
+    transactions: HashMap<u32, Transaction>,
 }
 
 impl TransactionProcessor {
@@ -15,6 +16,7 @@ impl TransactionProcessor {
     pub fn new() -> Self {
         TransactionProcessor {
             accounts: HashMap::new(),
+            transactions: HashMap::new(),
         }
     }
 
@@ -43,11 +45,51 @@ impl TransactionProcessor {
     }
 
     fn handle_deposit(&mut self, record: TransactionInput) {
-        // TODO: Implement deposit logic
+        // Deposits must have an amount
+        let Some(amount) = record.amount else {
+            return;
+        };
+
+        // Ignore if amount is negative or zero
+        if amount <= rust_decimal::Decimal::ZERO {
+            return;
+        }
+
+        // Deposits work if account is not locked
+        let account = self.get_or_create_account(record.client);
+        if account.deposit(amount) {
+            let transaction = Transaction::new(
+                record.tx,
+                record.client,
+                record.transaction_type,
+                amount,
+            );
+            self.transactions.insert(record.tx, transaction);
+        }
     }
 
     fn handle_withdrawal(&mut self, record: TransactionInput) {
-        // TODO: Implement withdrawal logic
+        // Withdrawals must have an amount
+        let Some(amount) = record.amount else {
+            return;
+        };
+
+        // Ignore if amount is negative or zero
+        if amount <= rust_decimal::Decimal::ZERO {
+            return;
+        }
+
+        // Withdrawals work if funds are available and account is not locked
+        let account = self.get_or_create_account(record.client);
+        if account.withdraw(amount) {
+            let transaction = Transaction::new(
+                record.tx,
+                record.client,
+                record.transaction_type,
+                amount,
+            );
+            self.transactions.insert(record.tx, transaction);
+        }
     }
 
     fn handle_dispute(&mut self, record: TransactionInput) {
