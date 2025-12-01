@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fs::File;
+use std::sync::Arc;
 
+use crate::logger::Logger;
 use crate::model::account::Account;
 use crate::model::error::ProcessorError;
 use crate::model::transaction::{Transaction, TransactionInput, TransactionState, TransactionType};
@@ -9,6 +11,7 @@ use crate::model::transaction::{Transaction, TransactionInput, TransactionState,
 pub struct TransactionProcessor {
     accounts: HashMap<u16, Account>,
     transactions: HashMap<u32, Transaction>,
+    logger: Option<Arc<Logger>>,
 }
 
 impl TransactionProcessor {
@@ -17,6 +20,21 @@ impl TransactionProcessor {
         TransactionProcessor {
             accounts: HashMap::new(),
             transactions: HashMap::new(),
+            logger: None,
+        }
+    }
+
+    pub fn with_logger(logger: Arc<Logger>) -> Self {
+        TransactionProcessor {
+            accounts: HashMap::new(),
+            transactions: HashMap::new(),
+            logger: Some(logger),
+        }
+    }
+
+    fn log(&self, message: &str) {
+        if let Some(ref logger) = self.logger {
+            logger.log(message);
         }
     }
 
@@ -47,11 +65,13 @@ impl TransactionProcessor {
     fn handle_deposit(&mut self, record: TransactionInput) {
         // Deposits must have an amount
         let Some(amount) = record.amount else {
+            self.log(&format!("DEPOSIT REJECTED: client={}, tx={}, reason=missing_amount", record.client, record.tx));
             return;
         };
 
         // Ignore if amount is negative or zero
         if amount <= rust_decimal::Decimal::ZERO {
+            self.log(&format!("DEPOSIT REJECTED: client={}, tx={}, amount={}, reason=non_positive_amount", record.client, record.tx, amount));
             return;
         }
 
@@ -59,7 +79,6 @@ impl TransactionProcessor {
         // Note: only deposits are stored since they're the only disputable transactions
         let account = self.get_or_create_account(record.client);
         if account.deposit(amount) {
-
             let transaction = Transaction::new(
                 record.tx,
                 record.client,
@@ -67,109 +86,152 @@ impl TransactionProcessor {
                 amount,
             );
             self.transactions.insert(transaction.tx_id, transaction);
+            self.log(&format!("DEPOSIT SUCCESS: client={}, tx={}, amount={}", record.client, record.tx, amount));
+        } else {
+            self.log(&format!("DEPOSIT REJECTED: client={}, tx={}, amount={}, reason=account_locked", record.client, record.tx, amount));
         }
     }
 
     fn handle_withdrawal(&mut self, record: TransactionInput) {
         // Withdrawals must have an amount
         let Some(amount) = record.amount else {
+            self.log(&format!("WITHDRAWAL REJECTED: client={}, tx={}, reason=missing_amount", record.client, record.tx));
             return;
         };
 
         // Ignore if amount is negative or zero
         if amount <= rust_decimal::Decimal::ZERO {
+            self.log(&format!("WITHDRAWAL REJECTED: client={}, tx={}, amount={}, reason=non_positive_amount", record.client, record.tx, amount));
             return;
         }
 
         // Withdrawals work if funds are available and account is not locked
         // Note: Withdrawals are not stored since they cannot be disputed
         let account = self.get_or_create_account(record.client);
-        account.withdraw(amount);
+        if account.withdraw(amount) {
+            self.log(&format!("WITHDRAWAL SUCCESS: client={}, tx={}, amount={}", record.client, record.tx, amount));
+        } else {
+            self.log(&format!("WITHDRAWAL REJECTED: client={}, tx={}, amount={}, reason=insufficient_funds_or_locked", record.client, record.tx, amount));
+        }
     }
 
     fn handle_dispute(&mut self, record: TransactionInput) {
         // Referenced transaction must exist
-        let Some(transaction) = self.transactions.get_mut(&record.tx) else {
+        let Some(transaction) = self.transactions.get(&record.tx) else {
+            self.log(&format!("DISPUTE REJECTED: client={}, tx={}, reason=transaction_not_found", record.client, record.tx));
             return;
         };
 
         // Verify the transaction belongs to the same client
-        if transaction.client_id != record.client {
+        let tx_client_id = transaction.client_id;
+        if tx_client_id != record.client {
+            self.log(&format!("DISPUTE REJECTED: client={}, tx={}, reason=client_mismatch (tx_client={})", record.client, record.tx, tx_client_id));
             return;
         }
 
         // Only deposits can be disputed
         if transaction.transaction_type != TransactionType::Deposit {
+            self.log(&format!("DISPUTE REJECTED: client={}, tx={}, reason=non_deposit_transaction", record.client, record.tx));
             return;
         }
 
         // Transaction must not already be disputed or charged back
-        if transaction.state != TransactionState::Normal {
+        let tx_state = transaction.state.clone();
+        if tx_state != TransactionState::Normal {
+            self.log(&format!("DISPUTE REJECTED: client={}, tx={}, reason=invalid_state (state={:?})", record.client, record.tx, tx_state));
             return;
         }
 
+        let tx_amount = transaction.amount;
+
         // Get the account and hold the funds
         let Some(account) = self.accounts.get_mut(&record.client) else {
+            self.log(&format!("DISPUTE REJECTED: client={}, tx={}, reason=account_not_found", record.client, record.tx));
             return;
         };
 
         // Mark transaction as under dispute
-        if account.hold_funds(transaction.amount) {
-            transaction.state = TransactionState::UnderDispute;
+        if account.hold_funds(tx_amount) {
+            self.transactions.get_mut(&record.tx).unwrap().state = TransactionState::UnderDispute;
+            self.log(&format!("DISPUTE SUCCESS: client={}, tx={}, amount={} (moved to held)", record.client, record.tx, tx_amount));
+        } else {
+            self.log(&format!("DISPUTE REJECTED: client={}, tx={}, reason=insufficient_available_funds", record.client, record.tx));
         }
     }
 
     fn handle_resolve(&mut self, record: TransactionInput) {
         // Referenced transaction must exist
-        let Some(transaction) = self.transactions.get_mut(&record.tx) else {
+        let Some(transaction) = self.transactions.get(&record.tx) else {
+            self.log(&format!("RESOLVE REJECTED: client={}, tx={}, reason=transaction_not_found", record.client, record.tx));
             return;
         };
 
         // Verify the transaction belongs to the same client
-        if transaction.client_id != record.client {
+        let tx_client_id = transaction.client_id;
+        if tx_client_id != record.client {
+            self.log(&format!("RESOLVE REJECTED: client={}, tx={}, reason=client_mismatch (tx_client={})", record.client, record.tx, tx_client_id));
             return;
         }
 
         // Transaction must be under dispute
-        if transaction.state != TransactionState::UnderDispute {
+        let tx_state = transaction.state.clone();
+        if tx_state != TransactionState::UnderDispute {
+            self.log(&format!("RESOLVE REJECTED: client={}, tx={}, reason=not_under_dispute (state={:?})", record.client, record.tx, tx_state));
             return;
         }
 
+        let tx_amount = transaction.amount;
+
         // Get the account and release the held funds
         let Some(account) = self.accounts.get_mut(&record.client) else {
+            self.log(&format!("RESOLVE REJECTED: client={}, tx={}, reason=account_not_found", record.client, record.tx));
             return;
         };
 
         // Mark transaction as resolved (back to normal)
-        if account.release_funds(transaction.amount) {
-            transaction.state = TransactionState::Normal;
+        if account.release_funds(tx_amount) {
+            self.transactions.get_mut(&record.tx).unwrap().state = TransactionState::Normal;
+            self.log(&format!("RESOLVE SUCCESS: client={}, tx={}, amount={} (moved to available)", record.client, record.tx, tx_amount));
+        } else {
+            self.log(&format!("RESOLVE REJECTED: client={}, tx={}, reason=insufficient_held_funds", record.client, record.tx));
         }
     }
 
     fn handle_chargeback(&mut self, record: TransactionInput) {
         // Referenced transaction must exist
-        let Some(transaction) = self.transactions.get_mut(&record.tx) else {
+        let Some(transaction) = self.transactions.get(&record.tx) else {
+            self.log(&format!("CHARGEBACK REJECTED: client={}, tx={}, reason=transaction_not_found", record.client, record.tx));
             return;
         };
 
         // Verify the transaction belongs to the same client
-        if transaction.client_id != record.client {
+        let tx_client_id = transaction.client_id;
+        if tx_client_id != record.client {
+            self.log(&format!("CHARGEBACK REJECTED: client={}, tx={}, reason=client_mismatch (tx_client={})", record.client, record.tx, tx_client_id));
             return;
         }
 
         // Transaction must be under dispute
-        if transaction.state != TransactionState::UnderDispute {
+        let tx_state = transaction.state.clone();
+        if tx_state != TransactionState::UnderDispute {
+            self.log(&format!("CHARGEBACK REJECTED: client={}, tx={}, reason=not_under_dispute (state={:?})", record.client, record.tx, tx_state));
             return;
         }
 
+        let tx_amount = transaction.amount;
+
         // Get the account and perform chargeback
         let Some(account) = self.accounts.get_mut(&record.client) else {
+            self.log(&format!("CHARGEBACK REJECTED: client={}, tx={}, reason=account_not_found", record.client, record.tx));
             return;
         };
 
         // Mark transaction as charged back and lock account
-        if account.chargeback(transaction.amount) {
-            transaction.state = TransactionState::ChargedBack;
+        if account.chargeback(tx_amount) {
+            self.transactions.get_mut(&record.tx).unwrap().state = TransactionState::ChargedBack;
+            self.log(&format!("CHARGEBACK SUCCESS: client={}, tx={}, amount={} (account locked)", record.client, record.tx, tx_amount));
+        } else {
+            self.log(&format!("CHARGEBACK REJECTED: client={}, tx={}, reason=insufficient_held_funds", record.client, record.tx));
         }
     }
 
