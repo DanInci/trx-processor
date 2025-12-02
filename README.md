@@ -86,3 +86,13 @@ When `--log-transactions` is enabled, logs are written to `transactions.log`:
 - **Space Complexity**: O(c + d) where c = unique clients, d = deposits (plus small overhead for locks)
 - **CSV Parsing**: Streaming
 - **Concurrency**: Thread-safe and ready for concurrent processing
+
+## AI Tool Usage Declaration
+
+**AI Tool Used**: Claude Code (Anthropic's Claude Sonnet 4.5)
+
+### Areas Where AI Assistance Was Used
+
+1. **Integration Tests** (`tests/tests.rs` and fixtures)
+2. **README.md** (`README.md`)
+3. **Concurrency Architecture Discussion**
