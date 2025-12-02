@@ -38,7 +38,7 @@ fn run() -> Result<(), ProcessorError> {
         None
     };
 
-    let mut processor = if let Some(logger) = logger {
+    let processor = if let Some(logger) = logger {
         TransactionProcessor::with_logger(logger)
     } else {
         TransactionProcessor::new()

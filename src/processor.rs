@@ -1,6 +1,7 @@
-use std::collections::HashMap;
 use std::fs::File;
 use std::sync::Arc;
+
+use dashmap::DashMap;
 
 use crate::logger::Logger;
 use crate::model::account::Account;
@@ -9,8 +10,8 @@ use crate::model::transaction::{Transaction, TransactionInput, TransactionState,
 
 
 pub struct TransactionProcessor {
-    accounts: HashMap<u16, Account>,
-    transactions: HashMap<u32, Transaction>,
+    accounts: DashMap<u16, Account>,
+    transactions: DashMap<u32, Transaction>,
     logger: Option<Arc<Logger>>,
 }
 
@@ -18,16 +19,16 @@ impl TransactionProcessor {
 
     pub fn new() -> Self {
         TransactionProcessor {
-            accounts: HashMap::new(),
-            transactions: HashMap::new(),
+            accounts: DashMap::new(),
+            transactions: DashMap::new(),
             logger: None,
         }
     }
 
     pub fn with_logger(logger: Arc<Logger>) -> Self {
         TransactionProcessor {
-            accounts: HashMap::new(),
-            transactions: HashMap::new(),
+            accounts: DashMap::new(),
+            transactions: DashMap::new(),
             logger: Some(logger),
         }
     }
@@ -38,7 +39,7 @@ impl TransactionProcessor {
         }
     }
 
-    pub fn process_file(&mut self, file_path: &str) -> Result<(), ProcessorError> {
+    pub fn process_file(&self, file_path: &str) -> Result<(), ProcessorError> {
         let file = File::open(file_path)?;
         let mut reader = csv::ReaderBuilder::new()
             .trim(csv::Trim::All)
@@ -52,7 +53,19 @@ impl TransactionProcessor {
         Ok(())
     }
 
-    fn process_transaction(&mut self, record: TransactionInput) {
+    fn process_transaction(&self, record: TransactionInput) {
+        // Get or create account to ensure ordering lock exists
+        let ordering_lock = {
+            let account = self.accounts
+                .entry(record.client)
+                .or_insert_with(|| Account::new(record.client));
+            account.ordering_lock.clone()
+        };
+
+        // Lock only this client (other clients can process concurrently)
+        let _guard = ordering_lock.lock();
+
+        // Process transaction with guaranteed ordering for this client
         match record.transaction_type {
             TransactionType::Deposit => self.handle_deposit(record),
             TransactionType::Withdrawal => self.handle_withdrawal(record),
@@ -62,7 +75,7 @@ impl TransactionProcessor {
         }
     }
 
-    fn handle_deposit(&mut self, record: TransactionInput) {
+    fn handle_deposit(&self, record: TransactionInput) {
         // Deposits must have an amount
         let Some(amount) = record.amount else {
             self.log(&format!("DEPOSIT REJECTED: client={}, tx={}, reason=missing_amount", record.client, record.tx));
@@ -77,7 +90,10 @@ impl TransactionProcessor {
 
         // Deposits work if account is not locked
         // Note: only deposits are stored since they're the only disputable transactions
-        let account = self.get_or_create_account(record.client);
+        let mut account = self.accounts
+            .entry(record.client)
+            .or_insert_with(|| Account::new(record.client));
+
         if account.deposit(amount) {
             let transaction = Transaction::new(
                 record.tx,
@@ -92,7 +108,7 @@ impl TransactionProcessor {
         }
     }
 
-    fn handle_withdrawal(&mut self, record: TransactionInput) {
+    fn handle_withdrawal(&self, record: TransactionInput) {
         // Withdrawals must have an amount
         let Some(amount) = record.amount else {
             self.log(&format!("WITHDRAWAL REJECTED: client={}, tx={}, reason=missing_amount", record.client, record.tx));
@@ -107,7 +123,10 @@ impl TransactionProcessor {
 
         // Withdrawals work if funds are available and account is not locked
         // Note: Withdrawals are not stored since they cannot be disputed
-        let account = self.get_or_create_account(record.client);
+        let mut account = self.accounts
+            .entry(record.client)
+            .or_insert_with(|| Account::new(record.client));
+
         if account.withdraw(amount) {
             self.log(&format!("WITHDRAWAL SUCCESS: client={}, tx={}, amount={}", record.client, record.tx, amount));
         } else {
@@ -115,7 +134,7 @@ impl TransactionProcessor {
         }
     }
 
-    fn handle_dispute(&mut self, record: TransactionInput) {
+    fn handle_dispute(&self, record: TransactionInput) {
         // Referenced transaction must exist
         let Some(transaction) = self.transactions.get(&record.tx) else {
             self.log(&format!("DISPUTE REJECTED: client={}, tx={}, reason=transaction_not_found", record.client, record.tx));
@@ -143,11 +162,15 @@ impl TransactionProcessor {
         }
 
         let tx_amount = transaction.amount;
+        drop(transaction);
 
         // Get the account and hold the funds
-        let Some(account) = self.accounts.get_mut(&record.client) else {
-            self.log(&format!("DISPUTE REJECTED: client={}, tx={}, reason=account_not_found", record.client, record.tx));
-            return;
+        let mut account = match self.accounts.get_mut(&record.client) {
+            Some(acc) => acc,
+            None => {
+                self.log(&format!("DISPUTE REJECTED: client={}, tx={}, reason=account_not_found", record.client, record.tx));
+                return;
+            }
         };
 
         // Mark transaction as under dispute
@@ -159,7 +182,7 @@ impl TransactionProcessor {
         }
     }
 
-    fn handle_resolve(&mut self, record: TransactionInput) {
+    fn handle_resolve(&self, record: TransactionInput) {
         // Referenced transaction must exist
         let Some(transaction) = self.transactions.get(&record.tx) else {
             self.log(&format!("RESOLVE REJECTED: client={}, tx={}, reason=transaction_not_found", record.client, record.tx));
@@ -181,11 +204,15 @@ impl TransactionProcessor {
         }
 
         let tx_amount = transaction.amount;
+        drop(transaction); // Release the read lock
 
         // Get the account and release the held funds
-        let Some(account) = self.accounts.get_mut(&record.client) else {
-            self.log(&format!("RESOLVE REJECTED: client={}, tx={}, reason=account_not_found", record.client, record.tx));
-            return;
+        let mut account = match self.accounts.get_mut(&record.client) {
+            Some(acc) => acc,
+            None => {
+                self.log(&format!("RESOLVE REJECTED: client={}, tx={}, reason=account_not_found", record.client, record.tx));
+                return;
+            }
         };
 
         // Mark transaction as resolved (back to normal)
@@ -197,7 +224,7 @@ impl TransactionProcessor {
         }
     }
 
-    fn handle_chargeback(&mut self, record: TransactionInput) {
+    fn handle_chargeback(&self, record: TransactionInput) {
         // Referenced transaction must exist
         let Some(transaction) = self.transactions.get(&record.tx) else {
             self.log(&format!("CHARGEBACK REJECTED: client={}, tx={}, reason=transaction_not_found", record.client, record.tx));
@@ -219,11 +246,15 @@ impl TransactionProcessor {
         }
 
         let tx_amount = transaction.amount;
+        drop(transaction); // Release the read lock
 
         // Get the account and perform chargeback
-        let Some(account) = self.accounts.get_mut(&record.client) else {
-            self.log(&format!("CHARGEBACK REJECTED: client={}, tx={}, reason=account_not_found", record.client, record.tx));
-            return;
+        let mut account = match self.accounts.get_mut(&record.client) {
+            Some(acc) => acc,
+            None => {
+                self.log(&format!("CHARGEBACK REJECTED: client={}, tx={}, reason=account_not_found", record.client, record.tx));
+                return;
+            }
         };
 
         // Mark transaction as charged back and lock account
@@ -235,16 +266,13 @@ impl TransactionProcessor {
         }
     }
 
-    fn get_or_create_account(&mut self, client_id: u16) -> &mut Account {
-        self.accounts
-            .entry(client_id)
-            .or_insert_with(|| Account::new(client_id))
-    }
-
     pub fn output_accounts(&self) -> Result<(), ProcessorError> {
         let mut writer = csv::Writer::from_writer(std::io::stdout());
 
-        let mut accounts: Vec<_> = self.accounts.values().collect();
+        let mut accounts: Vec<_> = self.accounts
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
         accounts.sort_by_key(|a| a.client_id);
 
         for account in accounts {

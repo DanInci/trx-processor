@@ -55,7 +55,7 @@ client,available,held,total,locked
 src/
 ├── main.rs              # CLI entry point
 ├── logger.rs            # Transaction logger
-├── processor.rs         # Core transaction processing logic
+├── processor.rs         # Transaction processing logic
 └── model/
     ├── account.rs       # Account types and state management
     ├── transaction.rs   # Transaction types and state management
@@ -83,6 +83,6 @@ When `--log-transactions` is enabled, logs are written to `transactions.log`:
 ## Performance Characteristics
 
 - **Time Complexity**: O(n) where n = number of transactions
-- **Space Complexity**: O(c + d) where c = unique clients, d = deposits
+- **Space Complexity**: O(c + d) where c = unique clients, d = deposits (plus small overhead for locks)
 - **CSV Parsing**: Streaming
-- **Concurrency**: Single-threaded (only one csv at a time supported)
+- **Concurrency**: Thread-safe and ready for concurrent processing

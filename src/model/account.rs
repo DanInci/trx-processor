@@ -1,5 +1,7 @@
 use rust_decimal::Decimal;
 use serde::Serialize;
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct Account {
@@ -7,6 +9,7 @@ pub struct Account {
     pub available: Decimal,
     pub held: Decimal,
     pub locked: bool,
+    pub ordering_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -38,6 +41,7 @@ impl Account {
             available: Decimal::ZERO,
             held: Decimal::ZERO,
             locked: false,
+            ordering_lock: Arc::new(Mutex::new(())),
         }
     }
 
